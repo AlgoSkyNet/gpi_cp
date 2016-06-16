@@ -1,0 +1,189 @@
+******************************************************************************
+				  GPI_CP
+                        In-Memory Checkpointing Library
+                      http://www.gpi-site.com/gpi2/cplib/
+		  
+		  	      Version: 1.0
+ 	          	  Copyright (C) 2016 -
+			     Fraunhofer ITWM
+			     
+******************************************************************************
+
+1. INTRODUCTION
+===============
+
+Checkpointing is a classical and probably the most often used
+technique to minimize the effect of failures when running a parallel
+program. It simply consists of saving a snapshot of a program’s state
+or produced data. An application can use such a snapshot to recover
+from a failure by continuing the execution from the saved point. To
+avoid the large overhead of I/O when writing to  persistent storage –
+an often pointed drawback of checkpointing – we opted for an in-memory
+checkpointing where the snapshot of a process is saved in the memory
+of a neighboring node. In case  of failure, a spare node can fetch the
+checkpoint from the neighbor of the failing process (mirror) and
+continue the work from that point. Another important aspect and a
+consequence of the GASPI  architecture, is that when NVRAM becomes
+widely available such an approach includes persistence
+(non-volatility) automatically.
+
+GASPI memory segments were conceived to represent any sort of
+available memory. NVRAM is one such sort. Our approach provides a
+simple interface for application developers, built on top of
+GASPI/GPI. This keeps the GASPI/GPI core lean and checkpointing as a
+separate option.
+
+
+2. REQUIREMENTS
+===============
+
+The current version of GPI_CP has the following requirements.
+
+Software:
+- GPI-2 communication library
+- libibverbs v1.1.6 (Verbs library from OFED) if running on Infiniband.
+- ssh server running on compute nodes (requiring no password).
+- gawk (GNU Awk) and sed utilities.
+
+Hardware:
+- Infiniband/RoCE device or Ethernet device.
+
+Environment:
+- set the CC variable to your C-compiler (e.g. gcc)
+- set the GPI2_HOME variable to an installation of GPI2 (e.g. /opt/GPI2)
+
+
+3. BUILDING GPI_CP
+=================
+
+GPI_CP is build via the top-level Makefile by executing 'make' in the
+main directory. This creates 
+- the library lib/libgpi_cp.a
+- the example binaries example/simple/simple.bin
+                       example/stencil/stencil.bin
+- the test binaries test/main_segment_id.bin
+                    test/main_single_checkpoint.bin
+
+
+4. BUILDING APPLICATIONS WITH GPI_CP
+==============================
+
+GPI_CP provides the library: lib/libgpi_cp.a
+          and the interface: include/gpi_cp.h
+
+Additionally, the GPI-2 communication library and header is needed.
+
+
+5. USING GPI_CP
+==============================
+
+Initialization Phase
+------------------------------
+The initialization of the checkpoint infrastructure is done by
+invoking checkpoint_init. Currently and following the GASPI semantic,
+the application must provide a segment, offset and size where  the
+data to be saved will be placed by the application. This is
+application specific. Moreover, a checkpoint policy and group must be
+given. The group is a GASPI construct and corresponds to the group of
+ranks that will be active and will perform checkpoints. The checkpoint
+policy corresponds to the selection of the neighbor where the mirrored
+data will be placed. One example is a policy that corresponds to a
+ring topology in one direction, where the mirror is always located on
+the right or on the left of a node. Other topologies are also possible
+and the checkpoint policy object can be chosen by the application. We
+have also foreseen that the checkpoint object could be created and
+given by the user, providing maximum flexibility. 
+
+After initialization, a checkpoint description is returned. This
+checkpoint description is then used to invoke other routines. One
+important consequence of this initialization design is that several
+snapshots are possible by simply invoking the initialization multiple
+times. This way, an application can have different checkpoints with
+different policies, different priorities and redundancy or
+persistence levels. 
+
+Check Pointing
+------------------------------
+Our in-memory checkpoint approach follows what we call an
+asynchronous, coordinated checkpointing approach. It is coordinated
+because at some point in time we ensure global consistency of a
+snapshot by means of a collective operation (gaspi_barrier). In other
+words, all active processes ensure that they have one particular
+snapshot that is consistent on all processes. It is asynchronous
+because we take advantage of GASPI/GPI communication. When a
+checkpoint is performed, the data is transferred using asynchronous
+communication to the mirror. 
+
+Performing a checkpoint is a two step procedure: the application must
+a) start a checkpoint and b) commit the checkpoint. Again, this
+split-phase semantic matches that of GASPI communication  and aims at
+hiding the costs of communication required by mirroring. Starting a
+checkpoint (checkpoint_start) initiates the copy of checkpoint data to
+the neighboring mirror. All the details  required to post that
+communication are included in the checkpoint description object. 
+
+Committing the checkpoint (checkpoint_commit) is a global operation
+and ensures the completion of a previously started checkpoint
+operation on all nodes. At this point, a valid snapshot exists to
+which the application can return to. Being a global operation and
+following the GASPI semantic, the commit operation has a timeout to
+avoid blocking. Moreover, the timeout parameter also allows  deciding
+whether to do a new checkpoint. It can be used as a test flag to check
+if the previously initiated commit is finished and take the decision
+to start a new one.
+
+Fault Detection 
+------------------------------
+The detection of faults is orthogonal to checkpoints and currently has
+to be programmed by the application. GASPI already provides mechanisms
+for that: timeouts and the error state vector. In the current GPI
+implementation, the hardware fault of a node can be detected locally
+by a process running on a node requesting communication to the faulty
+node. If a communication request is erroneous or returned timeout, the
+process can check the error state vector. The error state vector is
+set after every non-local operation and can be used to detect failures
+on the remote processes.  Each rank can either have a state of
+GASPI_STATE_HEALTHY or GASPI_STATE_CORRUPT. This error state vector
+can be queried by the application (using gaspi_state_vec_get) to
+determine  the state of a remote partner in case of timeout or error. 
+If a problem is detected, the fault needs to be communicated to and
+acknowledged by all other running processes. After fault detection all
+of the remaining and healthy processes can enter consistently the
+recovery process. 
+
+Recovery
+------------------------------
+Once a fault is detected, the remaining processes must enter a
+recovery step. Such recovery step will generally involve 3 actions: 
+
+    Bring-up of spare node(s) to overtake the place of the failed one(s).
+    Creation of the new group of active processes.
+    Restore data from consistent checkpoint.
+
+The first 2 actions must be programmed in the application although in
+principle it should be possible to perform this in a more automatic
+way. The third action corresponds to the  checkpoint_restore call of
+our in-memory checkpointing interface. 
+The checkpoint_restore call is symmetric to the checkpoint_init. The
+differences are that a new group of active processes is provided and
+the checkpoint description object is updated on the set of survivor
+nodes and created anew for the new joining (spare) nodes. Moreover, a
+valid snapshot will be retrieved from the corresponding mirrors and
+when the procedure returns successfully the data will be available in
+the provided memory segment. After this the application can continue
+from that point. 
+
+6. TROUBLESHOOTING
+==================
+
+
+7. UP COMING FEATURES
+=====================
+
+
+8. MORE INFORMATION
+===================
+
+For more information, check the GPI_CP website: 
+       http://www.gpi-site.com/gpi2/cplib/
+
